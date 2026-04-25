@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.22...4.2)
+project(metal_example_rowhammer)
+
+add_executable(metal_example_rowhammer)
+target_sources(metal_example_rowhammer PRIVATE rowhammer.cpp)
+
+if(NOT TARGET TT::Metalium)
+    find_package(TT-Metalium REQUIRED)
+endif()
+target_link_libraries(metal_example_rowhammer PUBLIC TT::Metalium)
+if(TARGET TT::CommonPCH)
+    target_precompile_headers(metal_example_rowhammer REUSE_FROM TT::CommonPCH)
+endif()
+
+# N-sided multi-core rowhammer (TRR evasion)
+add_executable(metal_example_rowhammer_nsided)
+target_sources(metal_example_rowhammer_nsided PRIVATE rowhammer_nsided.cpp)
+target_link_libraries(metal_example_rowhammer_nsided PUBLIC TT::Metalium)
+if(TARGET TT::CommonPCH)
+    target_precompile_headers(metal_example_rowhammer_nsided REUSE_FROM TT::CommonPCH)
+endif()
