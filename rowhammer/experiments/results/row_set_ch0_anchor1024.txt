@@ -1,0 +1,2 @@
+# Empirically discovered same-bank rows for channel ch0 (0,1) anchor row 1024 (addr 0x800000)
+# tier = SAME_BANK (851..890 cyc); offsets in bytes from channel base
