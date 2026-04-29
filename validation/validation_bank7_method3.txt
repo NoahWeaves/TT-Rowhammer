@@ -1,38 +1,38 @@
 # VALIDATION METHOD 3: Stride Sweep Around 8KB
 # DRAM channel 7 at NOC (9,7)
 # stride_bytes  median  mean  stddev  classification
-6144  833  840.875  23.5581  Same row
-6272  833  844  21.5174  Same row
-6400  833  844.375  22.3966  Same row
-6528  833  843.125  20.062  Same row
-6656  833  844  21.7945  Same row
-6784  833  843.625  20.9788  Same row
-6912  833  842.875  20.2851  Same row
-7040  833  841.125  18.6811  Same row
-7168  833  842.75  20.2716  Same row
-7296  833  839.375  16.5033  Same row
-7424  833  843  21.4009  Same row
-7552  833  840.625  17.7443  Same row
-7680  833  843.875  21.7884  Same row
-7808  833  841.859  19.3979  Same row
-7936  833  841.75  19.6326  Same row
-8064  833  847.125  23.6957  Same row
-8192  873  875.375  17.4172  Different row (near)  <-- TRANSITION
-8320  873  875.75  17.4481  Different row (near)
-8448  873  873.25  9.05193  Different row (near)
-8576  873  871.375  10.3131  Different row (near)
-8704  873  870.875  11.7679  Different row (near)
-8832  873  875.625  31.4024  Different row (near)
-8960  873  873.25  7.87004  Different row (near)
-9088  873  873.875  17.783  Different row (near)
-9216  873  870.875  11.0673  Different row (near)
-9344  873  872.75  12.4875  Different row (near)
-9472  873  871  11.225  Different row (near)
-9600  873  872.375  8.28308  Different row (near)
-9728  873  871.875  9.57781  Different row (near)
-9856  873  875.125  16.5676  Different row (near)
-9984  873  873.375  14.3129  Different row (near)
-10112  873  871.125  9.77161  Different row (near)
-10240  873  871  11.6619  Different row (near)
+6144  833  848  28.0891  Same row
+6272  833  840.5  16.9632  Same row
+6400  833  843.25  21.655  Same row
+6528  833  844.5  21.0654  Same row
+6656  833  844.375  21.8085  Same row
+6784  833  843.25  21.4695  Same row
+6912  833  841.75  19.4792  Same row
+7040  833  844.625  21.7683  Same row
+7168  833  844.125  21.383  Same row
+7296  833  840.75  16.2462  Same row
+7424  833  844.375  21.7166  Same row
+7552  833  841  18.4391  Same row
+7680  833  842.375  20.0277  Same row
+7808  833  840.562  16.8243  Same row
+7936  833  844.875  21.3538  Same row
+8064  833  842.125  18.7012  Same row
+8192  873  872.375  14.9201  Different row (near)  <-- TRANSITION
+8320  873  871.875  9.04071  Different row (near)
+8448  873  872.375  8.16146  Different row (near)
+8576  873  873.25  15.295  Different row (near)
+8704  873  871.75  9.18899  Different row (near)
+8832  873  870.75  9.84568  Different row (near)
+8960  873  872  11.3578  Different row (near)
+9088  873  871.625  9.00607  Different row (near)
+9216  873  872.75  7.74193  Different row (near)
+9344  873  872.625  8.65213  Different row (near)
+9472  873  872.875  8.77407  Different row (near)
+9600  873  875  16.8523  Different row (near)
+9728  873  871.5  10.2835  Different row (near)
+9856  873  872  10.5357  Different row (near)
+9984  873  870.125  11.6933  Different row (near)
+10112  873  872.875  7.68013  Different row (near)
+10240  873  870.5  11.7367  Different row (near)
 # Transition at: 8192 bytes
 # Results: 33/33 passed

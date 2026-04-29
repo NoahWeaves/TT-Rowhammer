@@ -1,0 +1,26 @@
+# DRAM read inspection
+# Verifies validation_probe.cpp mode 0 actually moves DRAM bytes
+# into L1 scratch (vs. dropped reads / phantom timings).
+#
+# DRAM endpoint  : NOC (0,1)
+# pattern_addr   : 0x493e80
+# addr_a         : 0x493e80
+# addr_b         : 0x495e80 (addr_a + 2000)
+# scratch_l1     : 0x17fb00
+#
+# Expected pattern:
+#   scratch[0..15]  = 0xAAAA0000 | i
+#   scratch[16..31] = 0xBBBB0000 | i
+#
+# Match A: 16/16
+# Match B: 16/16
+# Nonzero words in scratch: 32/32
+# Verdict: REAL_DATA
+#
+# Hex dump of scratch_l1 (128 B):
++0x00: aaaa0000 aaaa0001 aaaa0002 aaaa0003 aaaa0004 aaaa0005 aaaa0006 aaaa0007
++0x20: aaaa0008 aaaa0009 aaaa000a aaaa000b aaaa000c aaaa000d aaaa000e aaaa000f
++0x40: bbbb0000 bbbb0001 bbbb0002 bbbb0003 bbbb0004 bbbb0005 bbbb0006 bbbb0007
++0x60: bbbb0008 bbbb0009 bbbb000a bbbb000b bbbb000c bbbb000d bbbb000e bbbb000f
+#
+# (Latency sample for this single read pair: 471 cycles)

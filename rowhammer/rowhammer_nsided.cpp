@@ -26,18 +26,38 @@
 //    - Bank size: 16 rows (128 KB)
 //    - Max same-bank aggressors: 15 (all rows in bank except victim)
 //
+// 3. REF-SYNC TIMING (TRR timing evasion):
+//    When --delay or --delay-sweep is given, uses a combined N-sided +
+//    REF-sync kernel that inserts a calibrated delay between aggressor
+//    sweeps, shifting activations relative to DRAM auto-refresh windows.
+//
+// 4. EMPIRICAL ROW SETS (DRAMA-style):
+//    When --row-set-file is given, aggressors come from the measured
+//    same-bank set (produced by build_row_set) instead of the assumed
+//    ROWS_PER_BANK=16 model.
+//
+// 5. STARTUP GEOMETRY VALIDATION:
+//    On launch, probes ROWS_PER_BANK using the geometry_probe_kernel.
+//    Hard-warns if measured value != 16 and uses the measured value.
+//    Skip with --skip-geometry.
+//
 // Usage:
 //   ./metal_example_rowhammer_nsided [options]
 //
-//   --channel N       DRAM channel 0-7 (default: 0)
-//   --start-row N     First victim row (default: 1000)
-//   --num-rows N      Rows to sweep (default: 16)
-//   --iterations N    Sweeps through aggressors per row (default: 5000000)
-//   --pattern 0xNN    Victim data pattern (default: 0x55555555)
-//   --num-sides N     Number of aggressors, 2-15 (default: 14)
-//   --num-cores N     Tensix cores, 1-8 (default: 4)
-//   --barrier         Use serialized reads
-//   --all-channels    Sweep all 8 channels
+//   --channel N        DRAM channel 0-7 (default: 0)
+//   --start-row N      First victim row (default: 1000)
+//   --num-rows N       Rows to sweep (default: 16)
+//   --iterations N     Sweeps through aggressors per row (default: 5000000)
+//   --pattern 0xNN     Victim data pattern (default: 0x55555555)
+//   --num-sides N      Aggressors, 2-30 (default: 14; >15 adds cross-bank dummies)
+//   --num-cores N      Tensix cores, 1-8 (default: 4)
+//   --barrier          Use serialized reads
+//   --all-channels     Sweep all 8 channels
+//   --delay N          REF-sync delay per sweep (BRISC cycles, 0=off)
+//   --delay-sweep      Sweep delay_min..delay_max by delay_step (calibration)
+//   --delay-min/max/step  Tune the delay sweep range
+//   --row-set-file F   Use empirical aggressor addrs from build_row_set
+//   --skip-geometry    Skip startup ROWS_PER_BANK validation
 
 #include <algorithm>
 #include <array>
@@ -45,6 +65,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <fmt/core.h>
 #include <string>
 #include <vector>
@@ -124,11 +146,19 @@ static constexpr uint32_t ROW_SIZE         = 8192;
 static constexpr uint32_t CACHELINE        = 64;
 static constexpr double   NS_PER_CYCLE     = 1.25;
 static constexpr uint32_t ROWS_PER_BANK    = 16;    // from address bit mapping
+static constexpr uint32_t MAX_AGGRESSORS   = 30;    // kernel limit
 
 static constexpr uint32_t RESULT_HDR_WORDS   = 6;
 static constexpr uint32_t MAX_FLIP_RECORDS   = 32;
 static constexpr uint32_t FLIP_RECORD_WORDS  = 4;
 static constexpr uint32_t RESULT_BUF_WORDS   = RESULT_HDR_WORDS + MAX_FLIP_RECORDS * FLIP_RECORD_WORDS;
+
+// Geometry probe constants (for ROWS_PER_BANK validation)
+static constexpr uint32_t GEOPROBE_MAX_PROBES  = 64;
+static constexpr uint32_t GEOPROBE_RESULT_WORDS = 1 + GEOPROBE_MAX_PROBES;
+static constexpr uint32_t GEOPROBE_SCRATCH_BYTES = 2 * 1024;  // matches geometry_probe_kernel
+static constexpr uint32_t REF_DIFF_BANKGRP_CYC = 897;
+static constexpr uint32_t TIER_TOLERANCE        = 25;
 
 // ─── DRAM channel NOC coordinates ─────────────────────────────────────
 struct DramChannel {
@@ -149,26 +179,27 @@ static const DramChannel DRAM_CHANNELS[] = {
 };
 
 // ─── aggressor selection ──────────────────────────────────────────────
-// Select N aggressors from the same DRAM bank as the victim.
-// Bank = victim_row / 16 (bits 16:13 of address).
-// Priority: adjacent rows (V-1, V+1) first, then outward.
+// Select N aggressors, prioritizing the same DRAM bank as the victim.
+// Bank = victim_row / ROWS_PER_BANK (bits 16:13 of address).
+// Priority: adjacent rows (V-1, V+1) first, then outward within bank,
+// then cross-bank dummy rows to overflow TRR counters.
 static std::vector<uint32_t> select_same_bank_aggressors(
-    uint32_t victim_row, uint32_t num_sides, uint32_t min_safe_row) {
+    uint32_t victim_row, uint32_t num_sides, uint32_t min_safe_row,
+    uint32_t measured_rows_per_bank) {
 
     std::vector<uint32_t> aggrs;
-    uint32_t bank_start = (victim_row / ROWS_PER_BANK) * ROWS_PER_BANK;
-    uint32_t bank_end   = bank_start + ROWS_PER_BANK - 1;
+    uint32_t rpb = measured_rows_per_bank;
+    uint32_t bank_start = (victim_row / rpb) * rpb;
+    uint32_t bank_end   = bank_start + rpb - 1;
 
-    // Add aggressors in order of distance from victim (closest first)
-    for (uint32_t dist = 1; dist < ROWS_PER_BANK && aggrs.size() < num_sides; dist++) {
-        // Below victim
+    // Phase 1: same-bank aggressors (closest first) — these cause actual flips
+    for (uint32_t dist = 1; dist < rpb && aggrs.size() < num_sides; dist++) {
         if (victim_row >= dist + bank_start) {
             uint32_t r = victim_row - dist;
             if (r >= bank_start && r >= min_safe_row) {
                 aggrs.push_back(r);
             }
         }
-        // Above victim
         if (aggrs.size() < num_sides) {
             uint32_t r = victim_row + dist;
             if (r <= bank_end) {
@@ -177,7 +208,106 @@ static std::vector<uint32_t> select_same_bank_aggressors(
         }
     }
 
+    // Phase 2: cross-bank dummy aggressors (for TRR overflow).
+    // These don't cause flips on the victim but they pollute the TRR
+    // sampler's counter table, potentially evicting the real V±1 entries.
+    // Pull from adjacent banks above and below.
+    for (uint32_t dist = 1; aggrs.size() < num_sides; dist++) {
+        // Bank above
+        uint32_t above = bank_end + dist;
+        if (above >= min_safe_row && aggrs.size() < num_sides) {
+            aggrs.push_back(above);
+        }
+        // Bank below
+        if (bank_start >= dist + min_safe_row && aggrs.size() < num_sides) {
+            uint32_t below = bank_start - dist;
+            if (below >= min_safe_row) {
+                aggrs.push_back(below);
+            }
+        }
+        if (dist > 256) break;  // safety limit
+    }
+
+    if (aggrs.size() > MAX_AGGRESSORS) aggrs.resize(MAX_AGGRESSORS);
     return aggrs;
+}
+
+// Load empirical row set from file (one byte-offset per line, # comments).
+static std::vector<uint32_t> load_row_set_file(const std::string& path) {
+    std::vector<uint32_t> addrs;
+    std::ifstream f(path);
+    if (!f) {
+        fmt::print(stderr, "Error: cannot open row-set file: {}\n", path);
+        return addrs;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        uint32_t val = static_cast<uint32_t>(std::strtoul(line.c_str(), nullptr, 0));
+        if (val > 0) addrs.push_back(val);
+    }
+    return addrs;
+}
+
+// ─── ROWS_PER_BANK runtime validation ────────────────────────────────
+// Probes anchor vs anchor + k*8KB for k=1..32 using geometry_probe_kernel.
+// Returns measured ROWS_PER_BANK (first k where latency jumps to cross-bank tier).
+static uint32_t measure_rows_per_bank(
+    distributed::MeshDevice& mesh_device,
+    distributed::MeshCommandQueue& cq,
+    IDevice* device,
+    CoreCoord worker_core,
+    uint32_t geo_scratch_addr,
+    uint32_t geo_result_addr,
+    const DramChannel& ch,
+    uint32_t safe_addr)
+{
+    // Probe anchor vs anchor + k*8KB for k=1..32
+    constexpr uint32_t K_MAX = 32;
+    Program program = CreateProgram();
+    KernelHandle kid = CreateKernel(
+        program,
+        OVERRIDE_KERNEL_PREFIX "rowhammer/kernels/geometry_probe_kernel.cpp",
+        worker_core,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc       = NOC::RISCV_0_default});
+
+    std::vector<uint32_t> args;
+    args.reserve(5 + 2 * K_MAX);
+    args.push_back(ch.noc_x);
+    args.push_back(ch.noc_y);
+    args.push_back(geo_scratch_addr);
+    args.push_back(geo_result_addr);
+    args.push_back(K_MAX);
+    for (uint32_t k = 1; k <= K_MAX; ++k) {
+        args.push_back(safe_addr);
+        args.push_back(safe_addr + k * ROW_SIZE);
+    }
+    SetRuntimeArgs(program, kid, worker_core, args);
+
+    distributed::MeshWorkload workload;
+    workload.add_program(distributed::MeshCoordinateRange(mesh_device.shape()),
+                         std::move(program));
+    distributed::EnqueueMeshWorkload(cq, workload, /*blocking=*/false);
+    distributed::Finish(cq);
+
+    std::vector<uint32_t> result_vec;
+    detail::ReadFromDeviceL1(device, worker_core, geo_result_addr,
+                             GEOPROBE_RESULT_WORDS * sizeof(uint32_t), result_vec);
+
+    // Find first k where latency jumps to cross-bank-group tier
+    uint32_t measured = 0;
+    fmt::print("  B2 probe (anchor vs anchor+k·8KB):\n");
+    for (uint32_t k = 1; k <= K_MAX; ++k) {
+        uint32_t cyc = result_vec[k];
+        const char* tag = (cyc >= REF_DIFF_BANKGRP_CYC - TIER_TOLERANCE) ? " <-- JUMP" : "";
+        fmt::print("    k={:2d}: {:4d} cyc{}\n", k, cyc, tag);
+        if (measured == 0 && cyc >= REF_DIFF_BANKGRP_CYC - TIER_TOLERANCE) {
+            measured = k;
+        }
+    }
+    return measured;
 }
 
 #ifndef OVERRIDE_KERNEL_PREFIX
@@ -191,10 +321,17 @@ int main(int argc, char* argv[]) {
     uint32_t num_rows_to_test  = 16;
     uint32_t hammer_iterations = 5000000;
     uint32_t data_pattern      = 0x55555555;
-    uint32_t num_sides         = 14;         // aggressors (max same-bank = 15)
+    uint32_t num_sides         = 14;         // aggressors
     uint32_t num_cores         = 4;          // Tensix cores
     bool     all_channels      = false;
     uint32_t use_barrier       = 0;
+    uint32_t delay_iters       = 0;          // REF-sync delay (0 = disabled)
+    bool     delay_sweep       = false;      // sweep delay 0..256 step 8
+    uint32_t delay_min         = 0;
+    uint32_t delay_max         = 256;
+    uint32_t delay_step        = 8;
+    std::string row_set_file;                // empirical row set (C3)
+    bool     skip_geometry     = false;
 
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--channel") == 0 && i + 1 < argc) {
@@ -215,6 +352,20 @@ int main(int argc, char* argv[]) {
             all_channels = true;
         } else if (std::strcmp(argv[i], "--barrier") == 0) {
             use_barrier = 1;
+        } else if (std::strcmp(argv[i], "--delay") == 0 && i + 1 < argc) {
+            delay_iters = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--delay-sweep") == 0) {
+            delay_sweep = true;
+        } else if (std::strcmp(argv[i], "--delay-min") == 0 && i + 1 < argc) {
+            delay_min = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--delay-max") == 0 && i + 1 < argc) {
+            delay_max = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--delay-step") == 0 && i + 1 < argc) {
+            delay_step = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--row-set-file") == 0 && i + 1 < argc) {
+            row_set_file = argv[++i];
+        } else if (std::strcmp(argv[i], "--skip-geometry") == 0) {
+            skip_geometry = true;
         } else if (std::strcmp(argv[i], "--help") == 0) {
             fmt::print("Usage: {} [options]\n", argv[0]);
             fmt::print("  --channel N       DRAM channel 0-7 (default: 0)\n");
@@ -222,10 +373,16 @@ int main(int argc, char* argv[]) {
             fmt::print("  --num-rows N      Rows to sweep (default: 16)\n");
             fmt::print("  --iterations N    Sweeps per aggressor set (default: 5000000)\n");
             fmt::print("  --pattern 0xNN    Victim data pattern (default: 0x55555555)\n");
-            fmt::print("  --num-sides N     Aggressors, 2-15 (default: 14)\n");
+            fmt::print("  --num-sides N     Aggressors, 2-30 (default: 14)\n");
             fmt::print("  --num-cores N     Tensix cores, 1-8 (default: 4)\n");
             fmt::print("  --all-channels    Sweep all 8 DRAM channels\n");
             fmt::print("  --barrier         Use serialized reads\n");
+            fmt::print("  --delay N         REF-sync delay (BRISC cycles per sweep, 0=off)\n");
+            fmt::print("  --delay-sweep     Sweep delay {} to {} step {} (calibration)\n",
+                       delay_min, delay_max, delay_step);
+            fmt::print("  --delay-min/max/step  Tune delay-sweep range\n");
+            fmt::print("  --row-set-file F  Use empirical aggressor addrs from build_row_set\n");
+            fmt::print("  --skip-geometry   Skip startup ROWS_PER_BANK validation\n");
             return 0;
         }
     }
@@ -236,15 +393,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     if (num_sides < 2) num_sides = 2;
-    if (num_sides > 15) {
-        fmt::print("Warning: capping --num-sides to 15 (max same-bank rows)\n");
-        num_sides = 15;
+    if (num_sides > MAX_AGGRESSORS) {
+        fmt::print("Warning: capping --num-sides to {} (kernel MAX_AGGRESSORS)\n", MAX_AGGRESSORS);
+        num_sides = MAX_AGGRESSORS;
     }
     if (num_cores < 1) num_cores = 1;
     if (num_cores > 8) {
         fmt::print("Warning: capping --num-cores to 8\n");
         num_cores = 8;
     }
+    bool use_refsync = (delay_iters > 0 || delay_sweep);
 
     const DramChannel& ch = DRAM_CHANNELS[channel_idx];
     uint32_t ch_start = all_channels ? 0 : channel_idx;
@@ -262,10 +420,21 @@ int main(int argc, char* argv[]) {
     }
     fmt::print("║  Victim rows:  {} to {}\n", start_row, start_row + num_rows_to_test - 1);
     fmt::print("║  Iterations:   {} (sweeps through aggressor set)\n", hammer_iterations);
-    fmt::print("║  Aggressors:   {} (N-sided, same-bank TRR evasion)\n", num_sides);
+    fmt::print("║  Aggressors:   {} (N-sided{})\n", num_sides,
+               num_sides > ROWS_PER_BANK - 1 ? ", with cross-bank dummies" : ", same-bank TRR evasion");
     fmt::print("║  Cores:        {} (parallel hammer)\n", num_cores);
     fmt::print("║  Pattern:      0x{:08x}  (aggr: 0x{:08x})\n", data_pattern, ~data_pattern);
     fmt::print("║  Mode:         {}\n", use_barrier ? "serialized (barrier)" : "pipelined (fast)");
+    if (use_refsync) {
+        if (delay_sweep) {
+            fmt::print("║  REF sync:     sweep delay {}..{} step {}\n", delay_min, delay_max, delay_step);
+        } else {
+            fmt::print("║  REF sync:     delay={} BRISC cycles/sweep\n", delay_iters);
+        }
+    }
+    if (!row_set_file.empty()) {
+        fmt::print("║  Row set:      {} (empirical)\n", row_set_file);
+    }
     fmt::print("║  Row size:     {} bytes (8 KB)\n", ROW_SIZE);
     fmt::print("║  Bank size:    {} rows (128 KB)\n", ROWS_PER_BANK);
     fmt::print("╚══════════════════════════════════════════════════════════╝\n\n");
@@ -328,14 +497,55 @@ int main(int argc, char* argv[]) {
         start_row = min_safe_row;
     }
 
+    // ─── runtime ROWS_PER_BANK validation (B2) ───────────────────────
+    uint32_t measured_rpb = ROWS_PER_BANK;  // fallback
+    if (!skip_geometry) {
+        fmt::print("\n── Validating ROWS_PER_BANK ────────────────────────────\n");
+        uint32_t safe_anchor = ((dram_base / ROW_SIZE) + 64) * ROW_SIZE;
+
+        // Need separate scratch area for geometry probe (larger than hammer scratch)
+        uint32_t geo_scratch_addr = (l1_base + L1_ALIGN - 1) & ~(L1_ALIGN - 1);
+        uint32_t geo_result_addr  = (geo_scratch_addr + GEOPROBE_SCRATCH_BYTES + L1_ALIGN - 1) & ~(L1_ALIGN - 1);
+
+        measured_rpb = measure_rows_per_bank(
+            *mesh_device, cq, device, worker_cores[0],
+            geo_scratch_addr, geo_result_addr,
+            DRAM_CHANNELS[channel_idx], safe_anchor);
+
+        if (measured_rpb == 0) {
+            fmt::print("  WARNING: no cross-bank-group jump found in k=1..32\n");
+            fmt::print("  Falling back to hardcoded ROWS_PER_BANK={}\n", ROWS_PER_BANK);
+            measured_rpb = ROWS_PER_BANK;
+        } else if (measured_rpb != ROWS_PER_BANK) {
+            fmt::print("\n  *** ROWS_PER_BANK MISMATCH ***\n");
+            fmt::print("  Measured: {}   Hardcoded: {}\n", measured_rpb, ROWS_PER_BANK);
+            fmt::print("  The n-sided code has been hammering wrong rows!\n");
+            fmt::print("  Using measured value {} for this run.\n", measured_rpb);
+        } else {
+            fmt::print("  ROWS_PER_BANK = {} confirmed (matches constant)\n", measured_rpb);
+        }
+        fmt::print("────────────────────────────────────────────────────────\n\n");
+    }
+
+    // Load empirical row set if provided
+    std::vector<uint32_t> empirical_addrs;
+    if (!row_set_file.empty()) {
+        empirical_addrs = load_row_set_file(row_set_file);
+        if (empirical_addrs.empty()) {
+            fmt::print(stderr, "Error: row-set file is empty or unreadable\n");
+            return 1;
+        }
+        fmt::print("Loaded {} empirical aggressor addresses from {}\n",
+                   empirical_addrs.size(), row_set_file);
+    }
+
     // Ensure victim is in the middle of its bank for maximum aggressor coverage
-    uint32_t victim_bank_pos = start_row % ROWS_PER_BANK;
-    if (victim_bank_pos < 2 || victim_bank_pos > ROWS_PER_BANK - 3) {
-        // Shift to middle of bank
-        uint32_t bank_start_row = (start_row / ROWS_PER_BANK) * ROWS_PER_BANK;
-        uint32_t ideal_start = bank_start_row + ROWS_PER_BANK / 2;
+    uint32_t victim_bank_pos = start_row % measured_rpb;
+    if (victim_bank_pos < 2 || victim_bank_pos > measured_rpb - 3) {
+        uint32_t bank_start_row = (start_row / measured_rpb) * measured_rpb;
+        uint32_t ideal_start = bank_start_row + measured_rpb / 2;
         if (ideal_start < min_safe_row) {
-            ideal_start = ((min_safe_row / ROWS_PER_BANK) + 1) * ROWS_PER_BANK + ROWS_PER_BANK / 2;
+            ideal_start = ((min_safe_row / measured_rpb) + 1) * measured_rpb + measured_rpb / 2;
         }
         fmt::print("Note: shifting start_row {} -> {} (center of bank for max aggressor coverage)\n",
                    start_row, ideal_start);
@@ -359,39 +569,68 @@ int main(int argc, char* argv[]) {
         for (uint32_t row = start_row; row < start_row + num_rows_to_test; row++) {
             uint32_t victim_addr = row * ROW_SIZE;
 
-            // Select same-bank aggressors
-            auto aggr_rows = select_same_bank_aggressors(row, num_sides, min_safe_row);
-            uint32_t actual_sides = aggr_rows.size();
-
-            if (actual_sides < 2) {
-                fmt::print("   Row {:5d}: skipped (insufficient aggressors in bank)\n", row);
-                continue;
-            }
-
-            // Convert to addresses
+            // Select aggressors: empirical row set, or computed
             std::vector<uint32_t> aggr_addrs;
-            for (uint32_t r : aggr_rows) {
-                aggr_addrs.push_back(r * ROW_SIZE);
+            uint32_t actual_sides;
+
+            if (!empirical_addrs.empty()) {
+                // C3: use empirical same-bank addresses from build_row_set
+                aggr_addrs = empirical_addrs;
+                if (aggr_addrs.size() > MAX_AGGRESSORS)
+                    aggr_addrs.resize(MAX_AGGRESSORS);
+                actual_sides = aggr_addrs.size();
+            } else {
+                auto aggr_rows = select_same_bank_aggressors(
+                    row, num_sides, min_safe_row, measured_rpb);
+                actual_sides = aggr_rows.size();
+
+                if (actual_sides < 2) {
+                    fmt::print("   Row {:5d}: skipped (insufficient aggressors)\n", row);
+                    continue;
+                }
+
+                for (uint32_t r : aggr_rows) {
+                    aggr_addrs.push_back(r * ROW_SIZE);
+                }
+
+                // Print aggressor info on first row
+                if (row == start_row) {
+                    uint32_t same_bank_count = 0;
+                    uint32_t bank_s = (row / measured_rpb) * measured_rpb;
+                    uint32_t bank_e = bank_s + measured_rpb - 1;
+                    for (uint32_t r : aggr_rows) {
+                        if (r >= bank_s && r <= bank_e) same_bank_count++;
+                    }
+                    fmt::print("  Aggressors for row {}: {} total ({} same-bank, {} cross-bank dummies)\n",
+                               row, actual_sides, same_bank_count, actual_sides - same_bank_count);
+                    fmt::print("  Bank range: {}-{}  (measured RPB={})\n",
+                               bank_s, bank_e, measured_rpb);
+                }
             }
 
-            // Print aggressor info on first row
-            if (row == start_row) {
-                fmt::print("  Aggressors for row {}: [", row);
-                for (size_t i = 0; i < aggr_rows.size(); i++) {
-                    fmt::print("{}{}", aggr_rows[i], i + 1 < aggr_rows.size() ? ", " : "");
+            // Build list of delay values to sweep
+            std::vector<uint32_t> delays;
+            if (delay_sweep) {
+                for (uint32_t d = delay_min; d <= delay_max; d += delay_step) {
+                    delays.push_back(d);
                 }
-                fmt::print("] ({} rows in bank {}-{})\n",
-                           actual_sides,
-                           (row / ROWS_PER_BANK) * ROWS_PER_BANK,
-                           (row / ROWS_PER_BANK) * ROWS_PER_BANK + ROWS_PER_BANK - 1);
+            } else {
+                delays.push_back(delay_iters);
             }
+
+            for (uint32_t cur_delay : delays) {
 
             // ── create program ────────────────────────────────────────
             Program program = CreateProgram();
 
+            // Choose kernel: refsync variant if delay > 0
+            const char* kernel_path = (cur_delay > 0)
+                ? OVERRIDE_KERNEL_PREFIX "rowhammer/kernels/rowhammer_nsided_refsync_kernel.cpp"
+                : OVERRIDE_KERNEL_PREFIX "rowhammer/kernels/rowhammer_nsided_kernel.cpp";
+
             KernelHandle kernel_id = CreateKernel(
                 program,
-                OVERRIDE_KERNEL_PREFIX "rowhammer/kernels/rowhammer_nsided_kernel.cpp",
+                kernel_path,
                 core_range,
                 DataMovementConfig{
                     .processor = DataMovementProcessor::RISCV_0,
@@ -410,8 +649,9 @@ int main(int argc, char* argv[]) {
                     use_barrier,        // arg 7
                     actual_sides,       // arg 8: num_aggressors
                     c,                  // arg 9: core_id (0 = primary)
+                    cur_delay,          // arg 10: delay_iters (0 for plain kernel)
                 };
-                // Append aggressor addresses (args 10+)
+                // Append aggressor addresses (args 11+)
                 for (uint32_t addr : aggr_addrs) {
                     args.push_back(addr);
                 }
@@ -451,12 +691,17 @@ int main(int argc, char* argv[]) {
 
             rows_tested++;
 
+            std::string delay_tag = (cur_delay > 0)
+                ? fmt::format(", delay={}", cur_delay)
+                : "";
+
             if (num_flips > 0) {
                 total_flips_found += num_flips;
                 fmt::print("██ ROW {:5d} (0x{:06x}): {} BIT FLIPS! ({} words) "
-                           "[{} acts, {} sides, {} cores, {:.2f} M act/s]\n",
+                           "[{} acts, {} sides, {} cores, {:.2f} M act/s{}]\n",
                            row, victim_addr, total_bit_flips, num_flips,
-                           total_activations, actual_sides, num_cores, act_rate / 1e6);
+                           total_activations, actual_sides, num_cores, act_rate / 1e6,
+                           delay_tag);
 
                 uint32_t records = std::min(num_flips, MAX_FLIP_RECORDS);
                 for (uint32_t r = 0; r < records; r++) {
@@ -474,10 +719,12 @@ int main(int argc, char* argv[]) {
                 fmt::print("\n");
             } else {
                 fmt::print("   Row {:5d} (0x{:06x}): no flips  "
-                           "[{} total acts, {} sides, {} cores, {:.2f} M act/s]\n",
+                           "[{} total acts, {} sides, {} cores, {:.2f} M act/s{}]\n",
                            row, victim_addr, total_activations, actual_sides, num_cores,
-                           act_rate / 1e6);
+                           act_rate / 1e6, delay_tag);
             }
+
+            } // end delay sweep
 
             // ── periodic ECC check (every 4 rows) ─────────────────────
             if (rows_tested % 4 == 0) {
@@ -536,6 +783,20 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (measured_rpb != ROWS_PER_BANK) {
+        fmt::print("  Measured RPB:      {} (overrode hardcoded {})\n", measured_rpb, ROWS_PER_BANK);
+    }
+    if (!row_set_file.empty()) {
+        fmt::print("  Row set:           {} ({} addrs)\n", row_set_file, empirical_addrs.size());
+    }
+    if (use_refsync) {
+        if (delay_sweep) {
+            fmt::print("  REF sync:          sweep {}..{} step {}\n", delay_min, delay_max, delay_step);
+        } else {
+            fmt::print("  REF sync delay:    {}\n", delay_iters);
+        }
+    }
+
     if (total_flips_found > 0) {
         fmt::print("\n  *** ROWHAMMER VULNERABILITY CONFIRMED ***\n");
     } else {
@@ -544,6 +805,9 @@ int main(int argc, char* argv[]) {
         fmt::print("    - Different --start-row to hit other banks\n");
         fmt::print("    - --barrier mode for confirmed activations\n");
         fmt::print("    - Different --pattern (try 0x00000000 or 0xFFFFFFFF)\n");
+        fmt::print("    - --delay-sweep to try REF synchronization (C1)\n");
+        fmt::print("    - --row-set-file with empirical aggressors from build_row_set (C3)\n");
+        fmt::print("    - --num-sides 18-24 to test GPUHammer-sized TRR\n");
     }
     fmt::print("═══════════════════════════════════════════════════════════\n");
 

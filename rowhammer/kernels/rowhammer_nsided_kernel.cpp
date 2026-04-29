@@ -37,7 +37,8 @@
 //   arg 7:  use_barrier      0 = pipelined, 1 = serialized
 //   arg 8:  num_aggressors   number of aggressor rows (2..30)
 //   arg 9:  core_id          0 = primary (write+verify), >0 = hammer-only
-//   arg 10+: aggressor DRAM addresses (num_aggressors entries)
+//   arg 10: delay_iters      (unused by this kernel, reserved for refsync variant)
+//   arg 11+: aggressor DRAM addresses (num_aggressors entries)
 
 #include <cstdint>
 
@@ -64,13 +65,14 @@ void kernel_main() {
     uint32_t use_barrier     = get_arg_val<uint32_t>(7);
     uint32_t num_aggressors  = get_arg_val<uint32_t>(8);
     uint32_t core_id         = get_arg_val<uint32_t>(9);
+    // arg 10 = delay_iters (unused by this kernel, consumed by refsync variant)
 
     if (num_aggressors > MAX_AGGRESSORS) num_aggressors = MAX_AGGRESSORS;
 
-    // Read aggressor addresses
+    // Read aggressor addresses (start at arg 11)
     uint32_t aggr_addrs[MAX_AGGRESSORS];
     for (uint32_t i = 0; i < num_aggressors; i++) {
-        aggr_addrs[i] = get_arg_val<uint32_t>(10 + i);
+        aggr_addrs[i] = get_arg_val<uint32_t>(11 + i);
     }
 
     uint32_t scratch_a = l1_scratch_addr;
