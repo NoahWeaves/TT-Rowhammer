@@ -1,5 +1,11 @@
 # Rowhammer on Tenstorrent — Implementation Plan
 
+> **⚠️ Historical plan.** This document captures the original phased
+> implementation plan. The plan was substantially executed; outcomes and
+> the negative result are documented in
+> [`FINAL_REPORT.md`](FINAL_REPORT.md) with per-claim reproducers in
+> [`SESSION_VALIDATION.md`](SESSION_VALIDATION.md).
+
 Companion to [`CONTEXT.md`](CONTEXT.md). Read that first.
 
 The plan has three phases:

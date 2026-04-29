@@ -1,5 +1,12 @@
 # Rowhammer on Tenstorrent — Context Document
 
+> **⚠️ Superseded as the canonical source.** This document framed the project
+> at the start of the campaign. The "single source of truth" claim no longer
+> holds — current state, findings, and the four-method tRC validation live in
+> [`FINAL_REPORT.md`](FINAL_REPORT.md), with per-claim reproducers in
+> [`SESSION_VALIDATION.md`](SESSION_VALIDATION.md). This file is preserved
+> for context on early design decisions and external references.
+
 This document is the single source of truth for what we currently know, what we
 have built, and what external work we are leaning on. Read this before making
 any change in the working folder

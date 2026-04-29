@@ -1,5 +1,12 @@
 # Round 3 — Unblocking Attempts: Results
 
+> **⚠️ Historical run report (R3).** Preserved as part of the experimental
+> trail. R3's hypothesis that "per-access DRAM cost is invisible to user
+> space" was refined in R4 and again in the 2026-04-29 four-method tRC
+> validation. For the current canonical writeup, see
+> [`FINAL_REPORT.md`](../FINAL_REPORT.md). For per-claim reproducers, see
+> [`SESSION_VALIDATION.md`](../SESSION_VALIDATION.md).
+
 Goal: address the four "what would unblock progress" items from the previous
 report and re-run the attack with whatever lands.  The four items were:
 

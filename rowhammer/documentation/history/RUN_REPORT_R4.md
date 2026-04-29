@@ -1,5 +1,17 @@
 # Round 4 — NOC Coalescing Analysis and Real Activation Rate Measurement
 
+> **⚠️ Partially superseded.** The "29× coalescing factor" framing in this
+> report (a single-number ratio between FLUSH-READ and PIPELINED-READ rates)
+> conflates four distinct mechanisms (row-buffer hits, NIU packet
+> aggregation, controller reorder, FLUSH protocol overhead). The corrected
+> per-mechanism breakdown and the directly-validated ~24 M ACT/s/bank tRC
+> ceiling are in
+> [`FINAL_REPORT.md`](../FINAL_REPORT.md) §2 and §4, with reproducer
+> commands in [`SESSION_VALIDATION.md`](../SESSION_VALIDATION.md) claims 14–19.
+> Geometry, attack outcomes, and the NOC-RTT latency measurement in this R4
+> report all remain valid; only the coalescing-factor narrative has been
+> refined.
+
 ## Goal
 
 Round 3 concluded that "per-access DRAM cost is invisible to user space" but

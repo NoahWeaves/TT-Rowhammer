@@ -1,5 +1,13 @@
 # How to Reproduce These Findings
 
+> **⚠️ Partially superseded.** This Apr-10-era guide reproduces the geometry
+> validation but predates the rowhammer attack campaign and the 4-method tRC
+> ceiling validation. For the comprehensive reproducer index covering all 19
+> claims (geometry, attacks, ceilings, coalescing decomposition), see
+> [`rowhammer/documentation/SESSION_VALIDATION.md`](rowhammer/documentation/SESSION_VALIDATION.md).
+> For the canonical narrative, see
+> [`rowhammer/documentation/FINAL_REPORT.md`](rowhammer/documentation/FINAL_REPORT.md).
+
 ## Prerequisites
 
 - Tenstorrent Blackhole hardware with tt-metal SDK installed

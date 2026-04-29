@@ -1,5 +1,12 @@
 # Replication Steps
 
+> **⚠️ Partially superseded.** The build/setup instructions below are still
+> valid. Activation-rate claims (e.g., "~14–17M acts/s pipelined-read") are
+> NOC issue rates, not real DRAM activations — for the corrected
+> per-mechanism breakdown and the validated ~24 M ACT/s/bank tRC ceiling,
+> see [`FINAL_REPORT.md`](FINAL_REPORT.md). For the per-claim reproducer
+> index, see [`SESSION_VALIDATION.md`](SESSION_VALIDATION.md).
+
 How to reproduce the work in this repository on a fresh machine. This guide
 assumes you already have:
 
@@ -164,7 +171,7 @@ expected on Blackhole):
 
 Note: on the original hardware this campaign produced **0 ECC events and 0
 flips** across ~1.7 × 10¹⁰ activations — see
-[`RUN_REPORT_R3.md`](RUN_REPORT_R3.md). Do not interpret a clean run as a
+[`history/RUN_REPORT_R3.md`](history/RUN_REPORT_R3.md). Do not interpret a clean run as a
 failure of the *test*; it is the documented behaviour of the platform.
 
 ### B4 — Compiler-fold sanity (manual)
@@ -233,9 +240,11 @@ cd "$TT_METAL"
 
 ## 5. Interpreting results
 
-Everything you need is in [`RUN_REPORT.md`](RUN_REPORT.md),
-[`RUN_REPORT_R2.md`](RUN_REPORT_R2.md), and
-[`RUN_REPORT_R3.md`](RUN_REPORT_R3.md). The condensed expectation:
+For the canonical interpretation see [`FINAL_REPORT.md`](FINAL_REPORT.md)
+and [`SESSION_VALIDATION.md`](SESSION_VALIDATION.md). For historical
+campaign rounds, see [`history/RUN_REPORT_R1.md`](history/RUN_REPORT_R1.md),
+[`R2`](history/RUN_REPORT_R2.md), and
+[`R3`](history/RUN_REPORT_R3.md). The condensed expectation:
 
 - **Visible bit flips on readback:** 0. Per-row activation cost is not
   visible from user space; on-die ECC + TRR/RFM mitigations are active.

@@ -1,5 +1,10 @@
 # Run Report — 2026‑04‑25 (Round 2, with ECC instrumentation)
 
+> **⚠️ Historical run report (R2).** Preserved as part of the experimental
+> trail. For the current canonical writeup, see
+> [`FINAL_REPORT.md`](../FINAL_REPORT.md). For per-claim reproducers, see
+> [`SESSION_VALIDATION.md`](../SESSION_VALIDATION.md).
+
 Hardware: 4× Tenstorrent Blackhole, fw 19.4.2, GDDR6 @ 16 Gbps, all 8
 channels enabled per chip (`enabled_gddr=0xff`, `ddr_status=0x5555`),
 per‑chip max GDDR temp 44–52 °C.  All experiments on chip 0.

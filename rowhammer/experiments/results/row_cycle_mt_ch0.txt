@@ -1,0 +1,25 @@
+
+╔══════════════════════════════════════════════════════════════╗
+║       Multi-thread Row-Cycle Sweep (mode 7, K=16 pipelined)
+╠══════════════════════════════════════════════════════════════╣
+║  Channel:           ch0 all 3 sub-ports
+║  Tiles/sub-port:    16 (× 2 RISCs = 96 threads)
+║  Base row:          30000 (0x0ea60000)
+║  Iterations/thread: 2000000
+║  Reads/thread:      iterations × 16 (K=16 burst)
+╚══════════════════════════════════════════════════════════════╝
+
+   N   kernel reads    NIU MST req   NIU MST resp  M reads/s    per-thr   NIU:reads  interpretation
+------------------------------------------------------------------------------------------------------------------------
+   1      192000000      131184553      131184031     181.68      1.893       0.683  <— same-row baseline
+   2      192000000      130986207      130985673     167.87      1.749       0.682  moderate slowdown (mixed hit/miss)
+   4      192000000      130658778      130658207     162.71      1.695       0.681  moderate slowdown (mixed hit/miss)
+   8      192000000      130804060      130803513     163.54      1.704       0.681  moderate slowdown (mixed hit/miss)
+  16      192000000      130885651      130885172     162.48      1.693       0.682  moderate slowdown (mixed hit/miss)
+  32      192000000      129729410      129728883     145.80      1.519       0.676  moderate slowdown (mixed hit/miss)
+[Interpretation]
+  N=1 = same-row pipelined; row buffer hits all reads, only one ACT.
+  N≥2 with no slowdown   → controller reorders / row buffer > 1 row.
+  N≥2 with strong slowdown → every read is a real ACT (rowhammer-relevant).
+  NIU:reads ratio < 1.0  → NOC/NIU coalesces kernel calls into wider transactions.
+  NIU:reads ratio = 1.0  → every kernel noc_async_read is a separate NIU transaction.

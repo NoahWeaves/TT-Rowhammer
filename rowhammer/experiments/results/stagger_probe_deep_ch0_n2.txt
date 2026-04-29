@@ -1,0 +1,34 @@
+
+╔══════════════════════════════════════════════════════════════╗
+║       Thread-Stagger Probe — controller reorder window
+╠══════════════════════════════════════════════════════════════╣
+║  Channel:           ch0 all 3 sub-ports
+║  Threads:           96 (3 sp × 16 tiles × 2 RISCs)
+║  Base row:          30000 (0x0ea60000)
+║  Pattern:           N=2 alternating in same bank
+║  Reads/thread:      200
+║  Stagger semantics: thread_id × stagger_step cycles delay before timed loop
+╚══════════════════════════════════════════════════════════════╝
+
+Per-thread loop est: 200 reads × ~440 cyc = 88000 cyc (~110.0 µs)
+Decoupling threshold: stagger > per_loop / num_threads = 916 cyc
+
+  stagger   wall ms   M reads/s  (per-thr)    NIU:rd    hit%   miss%   M ACT/s
+-------------------------------------------------------------------------------------
+        0      13.4        1.44     153.93     0.911    0.0%   50.5%      0.96
+     1000       0.5       35.55     154.01     0.910    0.5%   50.3%     23.51
+     5000       0.9       22.39     153.42     0.902    0.2%   48.5%     14.88
+    25000       2.2        8.71     152.81     0.867    0.1%   40.9%      5.80
+   100000       7.5        2.56     152.81     0.500    0.0%   30.9%      1.70
+   250000      18.1        1.06     152.80     0.500    0.0%   29.6%      0.71
+   500000      35.7        0.54     152.55     0.500    0.0%   28.6%      0.36
+  1000000      70.9        0.27     153.18     0.500    0.0%   32.9%      0.18
+  2000000     141.3        0.14     152.56     0.500    0.0%   31.6%      0.09
+[Interpretation]
+  Two read-rate columns:
+    M reads/s    — TRUE aggregate (host wall time, captures stagger spread)
+    (per-thr)    — per-thread amortized × 96 (constant if loops same length)
+  As stagger grows beyond decoupling threshold, M reads/s should DROP because
+  threads no longer overlap. miss%% should RISE if coalescing weakens with
+  reduced overlap. M ACT/s = (miss%% + cont%%) × M reads/s — plateau at ~24 M
+  if tRC binds; rising past 24 M would invalidate our per-bank ceiling claim.

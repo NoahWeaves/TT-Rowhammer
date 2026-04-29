@@ -1,5 +1,10 @@
 # Phase B + C Run Report — 2026‑04‑25
 
+> **⚠️ Historical run report (R1).** Preserved as part of the experimental
+> trail. For the current canonical writeup of the negative result and the
+> four-method tRC validation, see [`FINAL_REPORT.md`](../FINAL_REPORT.md). For
+> per-claim reproducers, see [`SESSION_VALIDATION.md`](../SESSION_VALIDATION.md).
+
 Hardware: 4× Tenstorrent Blackhole (firmware bundle 19.4.2, KMD 2.6.0).  All
 runs on **chip 0**, worker core `(1,2)`.  Reference baseline data from
 `TT-Rowhammer/conflict_matrix.csv` (median 833 / 873 / 897 cyc bands).

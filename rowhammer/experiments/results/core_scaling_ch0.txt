@@ -1,0 +1,27 @@
+
+╔══════════════════════════════════════════════════════════════╗
+║       Core-Scaling Coalescing Sweep (FLUSH-READ)            ║
+╠══════════════════════════════════════════════════════════════╣
+║  Channel:        ch0 (0,1) (0,1)
+║  Victim row:     2008 (0x00fb0000)
+║  Aggressors:     8 (rows: 2007 2009 2006 2010 2005 2011 2004 2012)
+║  Iterations:     50000 per core (× 8 aggressors = 400000 acts/core)
+║  Worker pool:    130 cores available
+║  Sweep:          1 2 4 8 16 32 64 128
+╚══════════════════════════════════════════════════════════════╝
+
+ cores |     total acts |       max ms | M act/s/core |   M act/s aggr |  vs 1-core | flips
+-------+----------------+--------------+--------------+----------------+------------+------
+     1 |         400000 |        454.1 |        0.881 |          0.881 |      1.00x |     0
+     2 |         800000 |        454.1 |        0.881 |          1.762 |      1.00x |     0
+     4 |        1600000 |        454.1 |        0.881 |          3.523 |      1.00x |     0
+     8 |        3200000 |        454.1 |        0.881 |          7.046 |      1.00x |     0
+    16 |        6400000 |        446.8 |        0.895 |         14.325 |      1.02x |     0
+    32 |       12800000 |        535.4 |        0.747 |         23.908 |      0.85x |     0
+    64 |       25600000 |       1051.8 |        0.380 |         24.340 |      0.43x |     0
+   128 |       51200000 |       2249.0 |        0.211 |         22.766 |      0.24x |     0
+Interpretation:
+  per-core rate flat as N grows  -> NOC/per-core bound; scaling helps linearly.
+  per-core rate falls ~1/N       -> per-bank controller saturation; scaling does NOT help.
+  aggregate rate plateau         -> upper bound on real act/s reachable on this bank.
+  flips > 0                      -> the architectural mitigation has been broken.

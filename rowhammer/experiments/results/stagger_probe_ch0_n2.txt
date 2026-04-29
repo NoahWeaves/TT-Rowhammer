@@ -1,0 +1,31 @@
+
+╔══════════════════════════════════════════════════════════════╗
+║       Thread-Stagger Probe — controller reorder window
+╠══════════════════════════════════════════════════════════════╣
+║  Channel:           ch0 all 3 sub-ports
+║  Threads:           96 (3 sp × 16 tiles × 2 RISCs)
+║  Base row:          30000 (0x0ea60000)
+║  Pattern:           N=2 alternating in same bank
+║  Reads/thread:      4000
+║  Stagger semantics: thread_id × stagger_step cycles delay before timed loop
+╚══════════════════════════════════════════════════════════════╝
+
+  stagger  M reads/s    M NIU/s    NIU:rd    hit%   miss%   M ACT/s    min/max
+------------------------------------------------------------------------------------------
+    0cyc     153.74     140.00     0.911   84.5%   15.5%     23.90   325/772  
+   50cyc     153.72     139.97     0.911   84.5%   15.5%     23.90   325/795  
+  100cyc     153.73     140.01     0.911   84.5%   15.4%     23.86   325/1030 
+  250cyc     153.86     140.16     0.911   85.6%   14.0%     22.10   325/1051 
+  500cyc     153.83     140.11     0.911   84.8%   15.1%     23.43   325/616  
+ 1000cyc     153.73     140.02     0.911   84.5%   15.3%     23.86   325/1123 
+ 2500cyc     153.81     140.06     0.911   84.4%   15.6%     24.06   325/930  
+ 5000cyc     153.81     140.03     0.910   84.2%   15.7%     24.29   325/619  
+10000cyc     153.77     139.96     0.910   85.2%   14.6%     22.81   325/1214 
+25000cyc     153.83     139.78     0.909   85.6%   14.2%     22.09   325/867  
+[Interpretation]
+  Reading top to bottom: stagger increases, threads decoupled in time.
+  - hit%% should drop, miss%% should rise as coalescing weakens.
+  - M ACT/s should rise toward (and not exceed) ~24 M (per-bank tRC ceiling).
+  - The stagger value where miss%% saturates = controller's reorder time window.
+  - aggr M reads/s should drop at large stagger (each thread's NOC overhead
+    is no longer hidden by overlapping bursts from other threads).

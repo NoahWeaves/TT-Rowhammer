@@ -1,195 +1,293 @@
-# Blackhole DRAM Geometry & Rowhammer Research
+# Tenstorrent Blackhole Rowhammer Research
 
-> Characterizing LPDDR5 row structure on the Tenstorrent Blackhole chip as a prerequisite for rowhammer experimentation.
+> User-space rowhammer feasibility study on the Tenstorrent Blackhole's
+> 8-channel GDDR6 memory subsystem. Negative result: zero flips at the
+> per-bank activation ceiling, with a measured ~1000× per-row gap to
+> the published rowhammer MAC threshold.
 
 ---
 
 ## TL;DR
 
-We empirically determined that the Tenstorrent Blackhole's LPDDR5 DRAM has an **8KB row size**, confirmed across 401 independent tests with a 100% pass rate. The address mapping is simple (no XOR interleaving), the chip operates in **open-page mode**, and the hammer rate via pipelined NOC reads is ~**14–17M activations/second** — enough to exceed typical rowhammer thresholds by 25–100×.
+**Rowhammer attacks against Blackhole GDDR6 from user-space TT-Metalium are
+infeasible.** Across >50 billion confirmed NOC-issued reads (>1.7B real DRAM
+activations after controller coalescing), distributed across every attack
+configuration we could construct from user-space — single-bank concentrated,
+8-channel parallel, n-sided up to 20 aggressors, REF-sync delay sweeps,
+Blacksmith-style non-uniform timing, and a 1-hour sustained pipelined hammer
+at the per-bank ceiling — we observed:
+
+- **0 bit flips** on any pattern-verified victim row
+- **0 ECC corrected** errors (delta from idle baseline)
+- **0 ECC uncorrectable** errors
+
+The reason is an architectural ladder of three compounding limits:
+
+| Limit | Value | Source |
+|---|---|---|
+| Per-tile NOC issue rate | ~25 M reads/s | Tensix NOC port bandwidth |
+| Per-bank kernel-call rate at peak | ~168 M reads/s | 96 threads × 3 sub-ports, ch0, V±1 alternating |
+| Per-bank NIU transaction rate at peak | ~114 M / s | 32% NOC-level coalescing at multi-thread contention |
+| **Per-bank real ACT rate (validated)** | **~24 M ACT/s** | four independent measurements converge: `core_scaling` FLUSH-READ saturation = 24.0 M; `latency_band` miss-bin × rate = 26 M; `stagger_probe` (10 thread arrival patterns) = 22–25 M; `stagger_probe --deep` at full thread overlap = 25.3 M. tRC ≈ 41.7 ns |
+| Per-aggressor-row real ACT rate (V±1 split) | **~12 M ACT/s** | half of per-bank, since 2 rows alternate |
+| **Required for rowhammer (MAC threshold)** | **~25 G act/s/row** | published threshold ~100K acts per 3.9 µs tREFI |
+
+We are **~2100× below** the activation rate needed per refresh window per
+victim-row neighbor — that's per-tREFI count of ~47 acts vs MAC ~100K. The
+bottleneck is the per-bank physical tRC (~41.7 ns on this Blackhole), which
+fixes the per-bank ceiling at 24 M ACT/s regardless of how many threads or
+sub-ports we throw at it. Aggregate "M reads/s" numbers reported by the
+hammer tools are NOC issue rates that exceed this by 3–20×; the controller
+absorbs the surplus via row-buffer hits and queue reordering. **The 24 M
+ceiling is hardware physics — no user-space access pattern can exceed it.**
 
 ---
 
-## Background
+## What we measured
 
-Rowhammer attacks work by repeatedly activating (hammering) DRAM rows adjacent to a victim row, inducing bit flips through electrical interference. To do this effectively on new hardware, you first need to understand:
+All numbers are reproducible from the binaries built by `CMakeLists.txt`.
+See `documentation/SESSION_VALIDATION.md` for the full claim-by-claim
+verification protocol with reproducer commands.
 
-1. **Row size** — how many bytes map to a single DRAM row
-2. **Address mapping** — how byte addresses translate to (row, column) coordinates
-3. **Page mode** — whether the row buffer stays open between accesses (open-page) or is closed after each access (closed-page)
+### Geometry (validated across all 8 channels)
 
-This repo answers all three questions for the Blackhole chip.
-
----
-
-## Key Findings
-
-| Parameter | Value |
-|-----------|-------|
+| Property | Value |
+|---|---|
 | Row size | **8192 bytes (8KB)** |
-| Address mapping | **Sequential, no XOR hashing** |
-| Page mode | **Open-page** |
-| Same-row latency | 833 cycles (1041 ns @ 800MHz BRISC) |
-| Cross-row latency | 873 cycles (1091 ns) |
-| Row buffer penalty | **40 cycles (50 ns) per access** |
-| Pipelined hammer rate | **~14–17M activations/sec** |
-| Acts per 32ms refresh window | ~450K–550K |
-| Typical TRH threshold | 5K–20K (exceeded by 25–100×) |
+| Rows per bank group | **16** |
+| Bank addressing | XOR-scrambled (V±1 are same-bank, +16 jumps banks but +17/+18/+20 XOR back to same-bank) |
+| Same-row latency | 833 cyc |
+| Different-row latency | 873 cyc (+40 cyc row-switch penalty) |
+| Cross-bank-group latency | 897 cyc (+24 cyc additional) |
+| Memory controllers | **8 GDDR6 channels**, 3 NOC sub-ports each |
+| Page mode | Open-page with controller reordering |
 
-### Address Bit Layout
-
-```
-Byte address within DRAM bank:
-
- Bits [31:13]       Bits [12:6]       Bits [5:0]
- ┌──────────────┐  ┌──────────────┐  ┌──────────┐
- │  ROW SELECT  │  │   COLUMN     │  │  BYTE    │
- │  (524K rows) │  │  (128 cols)  │  │  OFFSET  │
- └──────────────┘  └──────────────┘  └──────────┘
-  Row = addr >> 13   64B per column    Within cache line
+Reproduce with:
+```bash
+./build_Release/programming_examples/metal_example_rh_verify_geometry
+./build_Release/programming_examples/metal_example_rh_test_addr_decoder
+./build_Release/programming_examples/metal_example_rh_bank_boundary
 ```
 
-- **Row N** spans addresses `[N × 8192, (N+1) × 8192 − 1]`
-- **Adjacent rows** are at ±`0x2000` offsets
-- **Double-sided hammer pattern**: victim at `V`, aggressors at `V − 0x2000` and `V + 0x2000`
+### Throughput ceilings (per-bank, single victim)
+
+| Config | Threads | M reads/s reported | Notes |
+|---|---|---|---|
+| 1 sub-port × 16 cores × 1 RISC | 16 | 14.3 | knee of single-sub-port scaling |
+| 1 sub-port × 32 cores × 1 RISC | 32 | 24.0 | NOC-port saturation |
+| 1 sub-port × 16 cores × 2 RISCs | 32 | 28.6 | dual-RISC adds ~2× |
+| 3 sub-ports × 16 cores × 2 RISCs | **96** | **79.8** | **per-bank ceiling** |
+| 3 sub-ports × ≥32 cores × 2 RISCs | >96 | regresses | oversubscription |
+
+Reproduce with `metal_example_rh_core_scaling`, `metal_example_rh_subport_sweep`,
+and `metal_example_rh_peak_attack --banks 1 --sub-ports 3 --tiles-per-sp 16`.
+
+### Why "M reads/s" ≠ DRAM activations: four mechanisms in series
+
+The reported "M reads/s" from any of these tools is the rate at which kernel
+code calls `noc_async_read`. Real DRAM row-activation rate is lower, due to
+four distinct mechanisms stacked in series:
+
+1. **Row-buffer hits (DRAM hardware).** The bank's row buffer holds exactly
+   one open row. Sequential reads to the same row hit the buffer with no
+   new ACT. Confirmed via `metal_example_rh_row_cycle` mode 7: at N=1 (all
+   reads to same row), single-thread throughput is 14.09 M reads/s; at
+   N≥2 (alternating distinct rows in same bank), throughput drops to 10.97
+   M reads/s and stays flat through N=64. The cache is 1-row-deep.
+
+2. **NOC packet coalescing (NIU level, contention-driven).** Single-thread
+   shows 1:1 ratio between kernel `noc_async_read` calls and NIU MST
+   transactions. Multi-thread (96 threads on one channel) shows **0.68:1**
+   — about 32% of kernel calls get aggregated by the NIU into wider NOC
+   transactions before reaching the controller. Independent of access
+   pattern. Confirmed via `metal_example_rh_row_cycle_mt`.
+
+3. **Controller request reordering (queue-depth-dependent).** With a
+   shallow queue (single-thread, K=16 in flight), the controller serves
+   in issue order — N=2 alternating gives all-miss behavior, no reordering.
+   With a deep queue (96 threads × K=16 ≈ 1500 in flight), the controller
+   has enough reorder window to batch same-row reads from the queue into
+   groups, dropping ACT count significantly. At N=2 multi-thread the
+   slowdown vs same-row is only 7.6% (vs 22% single-thread), implying
+   ~5× reorder amortization at peak config.
+
+4. **Per-bank tRC physical limit.** A single GDDR6 bank can do at most
+   ~21 M ACTs/s (tRC ≈ 48 ns). After the upstream coalescing layers, the
+   real ACT rate at the bank cannot exceed this regardless of how many
+   reads we issue.
+
+**Composite factor at peak attack config (96 threads, V±1, ch0):**
+
+| Layer | Rate after this layer | Coalescing factor at this layer |
+|---|---|---|
+| Kernel `noc_async_read` calls | 168 M reads/s | 1× |
+| → NIU transactions | 114 M / s | 1.47× |
+| → Real DRAM activations on bank | ~21 M / s | ~5× |
+| → Per aggressor row (split between V±1) | ~10.5 M ACT/s | 2× |
+
+So the per-row real activation rate is ~10 M/s = ~40 acts per tREFI window.
+Vs MAC threshold ~100K, the gap is **~2400×** at peak config.
+
+The R4 docs reported a "29× coalescing factor" derived from comparing
+FLUSH-READ throughput (0.88 M/s, single-thread, with 128 MB unrelated read
+between every probe) to PIPELINED throughput (25.81 M/s, single-thread,
+same-row hits). That 29× number conflated FLUSH-protocol overhead with
+single-thread row-buffer hits, and didn't directly measure controller
+reordering. The corrected breakdown above replaces that single-number
+framing.
+
+### Negative-result attacks (all 0 flips)
+
+| Attack | Total NOC reads | Real acts (est.) | Flips | ECC |
+|---|---|---|---|---|
+| `peak_attack` 8-channel default | 10.24 B | ~350 M | 0 | 0 |
+| `peak_attack --banks 1 --sub-ports 3 --tiles-per-sp 16` | 3.84 B | ~130 M | 0 | 0 |
+| `peak_attack_blacksmith --mode blacksmith --iterations 20M` | 3.84 B | ~130 M | 0 | 0 |
+| `peak_attack_refsync` (delay sweep 0..500) | ~1.7 B | ~60 M | 0 | 0 |
+| `long_hammer --duration-min 60 --channel 0` (1-hour) | **144.45 B** | **~5 B** | **0** | **0** |
+
+The 1-hour long_hammer is the strongest negative we have: 96 threads
+concentrated on ch0 victim row 30008 at the per-bank ceiling, sustained
+without per-read barriers for the full hour. Pre/post-attack ECC counters
+identical, victim row hash identical (`0xfec7f8a7920ec325` baseline preserved).
 
 ---
 
-## Validation Summary
-
-Five independent methods, all agreeing:
-
-| Method | Description | Tests | Result |
-|--------|-------------|-------|--------|
-| 1 | Explicit boundary test (21 address pairs) | 21/21 | ✅ PASS |
-| 2 | 8KB conflict matrix (8×8 at 8KB step) | 64/64 | ✅ PASS |
-| 2b | Sub-row matrix (16×16 at 1KB step) | 256/256 | ✅ PASS |
-| 3 | Stride sweep (6KB–10KB, 128B steps) | 33/33 | ✅ PASS |
-| 4 | Multiple base addresses (0 to 512MB) | 7/7 | ✅ PASS |
-| 5 | Bit-toggle classification (bits 6–25) | 20/20 | ✅ PASS |
-| | **TOTAL** | **401/401** | **✅ 100%** |
-
----
-
-## Methodology
-
-All timing was done **on-device** using a BRISC kernel (not from the host CPU), which is critical — host-side Python mmap reads mask row buffer effects due to CPU caching and PCIe latency overhead.
-
-**Measurement protocol (per test):**
-1. Read address A → opens A's row in the row buffer (warmup, not timed)
-2. Read address B → may cause A's row to be precharged (eviction)
-3. Time re-read of A → **if B evicted A, this is slow (873 cyc); if same row, fast (833 cyc)**
-
-Each measurement: 8 alternating A–B pairs, median of 32–64 samples. Row buffer flushed between measurements by reading from `addr + 128MB`.
-
----
-
-## Repo Structure
+## Repo layout
 
 ```
 .
-├── README.md                          ← You are here
+├── README.md                          ← This file
 │
-├── kernels/
-│   └── dram_latency_timer.cpp         ← On-device BRISC kernel (core timing logic)
-├── dram_latency.cpp                   ← Alternate/earlier version of BRISC kernel
+├── rowhammer/
+│   ├── rowhammer.cpp                  ← Original 2-sided rowhammer driver
+│   ├── rowhammer_nsided.cpp           ← N-sided + REF-sync + extension driver
+│   ├── CMakeLists.txt
+│   │
+│   ├── kernels/                       ← BRISC/NCRISC kernel sources
+│   ├── experiments/                   ← Host drivers (build into metal_example_rh_*)
+│   ├── documentation/
+│   │   ├── FINAL_REPORT.md            ← Canonical writeup of negative result + 4-method tRC validation
+│   │   ├── SESSION_VALIDATION.md      ← Per-claim reproducer commands (19 claims)
+│   │   ├── PLAN.md / CONTEXT.md       ← Project-start design docs (banner-deprecated)
+│   │   ├── replication_steps.md       ← Step-by-step reproduction
+│   │   ├── verification_report.md     ← Auto-gen Phase B verification (banner-annotated)
+│   │   └── history/                   ← Preserved campaign trail
+│   │       ├── RUN_REPORT_R1.md       ← Initial 2-sided sweep
+│   │       ├── RUN_REPORT_R2.md       ← Multi-pattern, multi-channel results
+│   │       ├── RUN_REPORT_R3.md       ← Controller-coalescing hypothesis tests
+│   │       └── RUN_REPORT_R4.md       ← Coalescing analysis (refined by FINAL_REPORT §2)
+│   └── tools/
+│       └── measure_dram_reads.py      ← NIU MST counter sampling helper
 │
-├── bar_test.py                        ← Low-level TLB + mmap setup for /dev/tenstorrent/0
-├── time_test.py                       ← Host-side timing attempt (superseded)
-├── time_test_fixed.py                 ← Improved host-side timing (ctypes/numpy)
-├── row_conflict_analysis.py           ← Initial closed-page mode analysis
-├── generate_presentation_plots.py     ← Generates all 5 figures from validation data
-│
-├── validation_8kb_boundaries.txt      ← Raw output of all 401 validation tests
-├── conflict_matrix.csv                ← 16×16 matrix at 1KB granularity
-├── address_bit_mapping.txt            ← Per-bit toggle latency (bits 6–25)
-├── row_size_determination.txt         ← Burst read stride sweep data
-├── row_verification.txt               ← Explicit boundary pair measurements
-├── validation_column_independence.txt ← Confirms all columns within a row behave identically
-│
-├── PRESENTATION_SUMMARY.md            ← Full validated findings (start here for deep dive)
-├── PRESENTATION_FIGURES.md            ← Figure captions for the 5 generated plots
-├── REPRODUCTION_GUIDE.md              ← Step-by-step build & run instructions
-├── summary_dram_geometry.md           ← Technical reference: address layout, row buffer behavior
-│
-└── generated/
-    ├── inspector/                     ← tt-metal inspector logs (kernel compile, device lifecycle)
-    └── watcher/                       ← Kernel ELF paths and names
+├── validation/                        ← Pre-recorded geometry validation outputs
+├── refresh/                           ← Refresh-rate measurement traces
+├── scripts/                           ← Build-helper scripts
+└── generated/                         ← tt-metal compile artifacts (gitignored)
 ```
 
-**Start reading:** `PRESENTATION_SUMMARY.md` for a complete technical writeup, or `summary_dram_geometry.md` for a concise reference card.
+**Start reading:**
+- [`rowhammer/documentation/FINAL_REPORT.md`](rowhammer/documentation/FINAL_REPORT.md)
+  — canonical writeup of the negative result, the 4-method tRC validation,
+  comparison to GPUHammer, and path forward.
+- [`rowhammer/documentation/SESSION_VALIDATION.md`](rowhammer/documentation/SESSION_VALIDATION.md)
+  — per-claim reproducer commands with expected outputs (19 claims).
+- [`rowhammer/documentation/history/`](rowhammer/documentation/history/)
+  — R1–R4 historical run reports preserved as the campaign trail. Their
+  interpretive narratives have been refined by FINAL_REPORT §2 and §4.
 
 ---
 
-## How the BRISC Kernel Works
+## Building & running
 
-The core timing kernel (`kernels/dram_latency_timer.cpp`) runs on the **BRISC** (RISC-V core) at 800MHz directly on the Blackhole chip. It reads the chip's hardware wall clock to get cycle-accurate timing unaffected by host CPU or PCIe jitter.
-
-```cpp
-// Simplified logic
-noc_async_read(addr_a, scratch_a, 64);   // Open row A (warmup)
-noc_async_read_barrier();
-noc_async_read(addr_b, scratch_b, 64);   // Possibly evict A
-noc_async_read_barrier();
-
-uint64_t t0 = get_wall_clock();
-noc_async_read(addr_a, scratch_a, 64);   // Time re-access to A
-noc_async_read_barrier();
-uint64_t t1 = get_wall_clock();
-
-results[i] = (uint32_t)(t1 - t0);       // 833 = same row, 873 = different row
-```
-
----
-
-## Reproducing the Results
-
-**Prerequisites:** Tenstorrent Blackhole hardware, tt-metal SDK, cmake + clang, Python 3.8+
+Prerequisites: tt-metal SDK, cmake, Tenstorrent Blackhole hardware.
 
 ```bash
-# Build
-cd ~/tt-metal
-cmake --build build --target metal_example_validation_test -j$(nproc)
-
-# Run all 401 validation tests (~1-2 seconds)
-./build/programming_examples/metal_example_validation_test
-# Expected: ALL TESTS PASSED (401/401)
-
-# Generate plots
-cd rowhammer
-python3 generate_presentation_plots.py
+cd ~/tt-metal && source python_env/bin/activate
+cmake --build build_Release -j$(nproc) --target \
+    metal_example_rowhammer \
+    metal_example_rowhammer_nsided \
+    metal_example_rh_verify_geometry \
+    metal_example_rh_test_addr_decoder \
+    metal_example_rh_core_scaling \
+    metal_example_rh_bank_scaling \
+    metal_example_rh_subport_sweep \
+    metal_example_rh_subport_probe \
+    metal_example_rh_intra_channel \
+    metal_example_rh_bank_boundary \
+    metal_example_rh_forced_act \
+    metal_example_rh_peak_attack \
+    metal_example_rh_peak_refsync \
+    metal_example_rh_blacksmith \
+    metal_example_rh_long_hammer
 ```
 
-See `REPRODUCTION_GUIDE.md` for full instructions including the row mapping discovery and page mode tests.
+All binaries land in `build_Release/programming_examples/`.
+
+To reproduce the headline negative result in ~50 sec:
+```bash
+./build_Release/programming_examples/metal_example_rh_peak_attack
+# 8 banks × 16 tiles × 2 RISCs = 256 threads, ~223 M aggregate, 0 flips
+```
+
+To reproduce the coalescing measurement:
+```bash
+./build_Release/programming_examples/metal_example_rh_forced_act --channel 0
+# FLUSH-READ vs PIPELINED side-by-side; ~29× ratio
+```
 
 ---
 
-## Rowhammer Next Steps
+## Known caveats
 
-The characterization phase is complete. What's needed next:
+1. **BRISC wall_clock constant is approximate.** All experiments use
+   `NS_PER_CYCLE=1.25` (i.e., assume BRISC at 800 MHz, matching telemetry
+   `aiclk`). Empirically, the 1-hour `long_hammer` run with
+   `duration_cycles = 60 min × 800e6` completed in 35.6 min host wall, implying
+   the BRISC `wall_clock` register increments at ~1.35 GHz — likely a different
+   clock domain (REFCLK). **All "M reads/s" numbers reported by these tools
+   are systematically underestimated by ~1.685×.** Ratios (coalescing factor,
+   gap to threshold) are scale-invariant and unaffected. Fix is pending.
 
-1. **Write a hammer kernel** — rapidly alternate between two aggressor rows at `V − 0x2000` and `V + 0x2000`
-2. **Write a victim check kernel** — read the victim row and check for bit flips
-3. **Identify vulnerable bit positions** — run across many victim row addresses
-4. **Build an exploit** — map target data (e.g. model weights, page tables) to vulnerable rows
+2. **`verify_geometry` Phase-B inline probe shows WARN.** The kernel uses
+   serialized reads where the ~456-cycle NOC round-trip masks the ~40-cycle
+   row-switch penalty, so latency tiers don't separate inline. The original
+   `validation_probe` from `tt_metal/programming_examples/dram_latency`
+   uses pipelined-burst-with-flush and reproduces 833/873/897 cycles cleanly
+   on all 8 channels. See `documentation/history/RUN_REPORT_R4.md` §1 for full explanation.
 
-The hammer rate of ~14–17M activations/sec with pipelined NOC reads should comfortably exceed the threshold needed to induce bit flips.
+3. **Per-bank "M act/s" numbers in tools are NOC issue rates, not real DRAM
+   activations.** Apply the coalescing divider (~29× for reads, ~24× for
+   writes) when interpreting against rowhammer thresholds.
 
 ---
 
-## Hardware & Software
+## Hardware
 
 | Component | Details |
-|-----------|---------|
-| Hardware | Tenstorrent Blackhole (4GB LPDDR5 per bank, 8 banks) |
-| BRISC clock | 800MHz (1 cycle = 1.25ns) |
-| Target | DRAM Bank 0, NOC endpoint (0,1) |
-| SDK | tt-metal |
-| OS | Ubuntu 24.04 |
-| Date | 2026-02-26 |
+|---|---|
+| Hardware | Tenstorrent Blackhole, 4 GB GDDR6 per channel × 8 channels = 32 GB |
+| Tile grid | 14 × 10 = 140 functional Tensix workers |
+| Per-tile NOC ports | 2 (BRISC noc0, NCRISC noc1) |
+| GDDR6 controllers | 8, with 3-way NOC sub-port ingress each |
+| BRISC clock (telemetry) | 800 MHz aiclk |
+| BRISC `wall_clock` register | empirically ~1.35 GHz (separate domain) |
 
 ---
 
-## Related Work
+## Related work
 
-This project is directly motivated by [GPUHammer](https://github.com/sith-lab/gpuhammer) (SEC '25), which demonstrated Rowhammer bit flips on NVIDIA RTX A6000 GDDR6 memory and used them to corrupt ML model weights. See `SEC25_GPUHammer2.pdf` and `sandpsubmissiongpuhammer.pdf` in this repo for the full paper.
+This project is a Blackhole-architecture follow-on to GPUHammer (USENIX
+SEC '25), which demonstrated rowhammer flips on NVIDIA RTX A6000 GDDR6 and
+ML model corruption. The core finding here — that user-space cannot reach
+the per-row activation rate needed under any combination of available
+levers — differs from GPUHammer's conclusion on NVIDIA hardware. The
+Blackhole architecture's NOC latency floor (~456 cyc) and the GDDR6
+controller's request reordering produce a per-row real activation rate
+~1000× below the MAC threshold, where GPUHammer's setup reached the
+threshold by exploiting CUDA-level memory access patterns that have no
+direct analogue in TT-Metalium.
+
+The path from this work to actual flips runs through firmware/driver
+escalation (controller MMIO access, refresh-policy manipulation, custom
+ARC firmware), not user-space exploit refinement.

@@ -1,0 +1,35 @@
+
+╔══════════════════════════════════════════════════════════════╗
+║       Row-Buffer Cache Depth Probe (mode 7, K=16 pipelined)
+╠══════════════════════════════════════════════════════════════╣
+║  Channel:        ch0 sub-port 0 (NOC 0,0)
+║  Base addr:      0x0ea60000  (row 30000)
+║  Iterations:     40000 per N
+║  Reference: same-row pipelined ≈ 48 cyc, cross-row ≈ 57 cyc
+╚══════════════════════════════════════════════════════════════╝
+
+   N      reads    NIU req   NIU resp  cyc/read (ns)    M reads/s  interpretation
+--------------------------------------------------------------------------------------------------------------
+   1      40000      40000      40000       56.8 (  71)        14.08  all hits (cached)
+   2      40000      40000      40000       73.0 (  91)        10.97  <— KNEE: cache exceeded
+   3      40000      40000      40000       72.8 (  91)        10.99  all misses (uncached)
+   4      40000      40000      40000       73.0 (  91)        10.95  all misses (uncached)
+   5      40000      40000      40000       73.0 (  91)        10.96  all misses (uncached)
+   6      40000      40000      40000       72.8 (  91)        10.99  all misses (uncached)
+   7      40000      40000      40000       72.9 (  91)        10.97  all misses (uncached)
+   8      40000      40000      40000       73.0 (  91)        10.96  all misses (uncached)
+  10      40000      40000      40000       73.0 (  91)        10.96  all misses (uncached)
+  12      40000      40000      40000       73.0 (  91)        10.96  all misses (uncached)
+  16      40000      40000      40000       73.2 (  91)        10.94  all misses (uncached)
+  20      40000      40000      40000       73.1 (  91)        10.95  all misses (uncached)
+  24      40000      40000      40000       73.1 (  91)        10.95  all misses (uncached)
+  32      40000      40000      40000       73.1 (  91)        10.94  all misses (uncached)
+  48      40000      40000      40000       73.1 (  91)        10.94  all misses (uncached)
+  64      40000      40000      40000       73.1 (  91)        10.94  all misses (uncached)
+
+[Interpretation]
+  N=1 floor = same-row pipelined ceiling (NOC + row buffer hit).
+  When cyc/read jumps by ≥4-6 cyc, the controller's row buffer cache
+  is overflowed. That N is the smallest hammer-set that produces real
+  ACTs at the GDDR6 controller. For rowhammer, per-row ACT rate is
+  bounded above by (single-thread DRAM throughput / N).

@@ -1,5 +1,14 @@
 # Blackhole DRAM Geometry
 
+> **⚠️ Partially superseded.** The geometry table below (row size, column/row
+> bit splits, page mode) remains valid. The "Hammer rate ~14–17M
+> activations/sec" claim is **incorrect** — that's NOC issue rate, not real
+> DRAM activation rate. Real per-row ACT rate is ~12 M/s, ~2100× below the
+> rowhammer MAC threshold. The "BRISC clock 800 MHz" reference is also
+> wrong: wall_clock register increments at ~1.35 GHz on this part. For the
+> corrected canonical writeup, see
+> [`rowhammer/documentation/FINAL_REPORT.md`](rowhammer/documentation/FINAL_REPORT.md).
+
 **Memory technology:** GDDR6 (8 physical channels, accessed via NOC endpoints)
 
 ## Confirmed Parameters

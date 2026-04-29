@@ -1,5 +1,17 @@
 # Blackhole DRAM Geometry: Validated Findings
 
+> **⚠️ Partially superseded.** The geometry findings below (8 KB row size,
+> address mapping, per-channel layout) remain valid. The activation-rate and
+> rowhammer-feasibility claims (e.g., "14–17M activations/sec exceeding the
+> threshold by 25–100×") are **incorrect** — those rates are NOC issue rates,
+> not real DRAM activations. Real per-row ACT rate is ~12 M/s, ~2100× below
+> threshold. Likewise the "BRISC clock 800 MHz" assumption is wrong — the
+> wall_clock register increments at ~1.35 GHz on this part. For the
+> corrected canonical writeup, see
+> [`rowhammer/documentation/FINAL_REPORT.md`](rowhammer/documentation/FINAL_REPORT.md).
+> For per-claim reproducers, see
+> [`rowhammer/documentation/SESSION_VALIDATION.md`](rowhammer/documentation/SESSION_VALIDATION.md).
+
 **Date:** 2026-02-26 (single-channel), extended 2026-04-10 (all 8 channels)
 **Hardware:** Tenstorrent Blackhole — **GDDR6**, 8 physical channels (~4 GB each)
 **Original target:** DRAM channel 0, NOC endpoint (0,1)
