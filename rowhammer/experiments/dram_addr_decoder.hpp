@@ -11,9 +11,16 @@
 // Same-bank-group test uses the cross-bank-group bit boundary observed in
 // the address-bit-toggle measurements (873 vs 897 cycle median): bits 13..16
 // toggle stays inside a bank (873 cyc), bits 17+ jump to a different bank
-// group (897 cyc).  ROWS_PER_BANK = 16 is therefore inferred to be 1 << 4 =
-// 16; this constant is the SUBJECT of verification step B2 and may be
-// updated based on measured data.
+// group (897 cyc).  This gives ROWS_PER_BANK = 1 << 4 = 16.
+//
+// ROWS_PER_BANK = 16 is **confirmed** by `experiments/bank_boundary_probe.cpp`:
+// under FLUSH-READ ground-truth activation timing, aggregate ACT/s jumps
+// from ~80 M (same-bank, controller serializes on tRC) to ~84 M (different
+// bank, ACTs can pipeline) at spacing = 16 rows. That probe also discovered
+// XOR scrambling at offsets +17/+18/+20 (these cancel back to the same bank
+// despite crossing the +16 threshold), so bank ID is not just `addr >> 17` —
+// any code that needs the actual bank function should use bank_boundary_probe
+// data, not just BANK_GROUP_SHIFT below.
 
 #pragma once
 
@@ -28,7 +35,7 @@ inline constexpr uint32_t CACHELINES_PER_ROW    = ROW_SIZE / CACHELINE;  // 128
 inline constexpr uint32_t COLUMNS_PER_ROW       = CACHELINES_PER_ROW;
 inline constexpr uint32_t ROW_SHIFT             = 13;          // log2(8192)
 inline constexpr uint32_t COL_SHIFT             = 6;           // log2(64)
-inline constexpr uint32_t BANK_GROUP_SHIFT      = 17;          // bits 17+ cross bank groups (inferred)
+inline constexpr uint32_t BANK_GROUP_SHIFT      = 17;          // bits 17+ cross bank groups (confirmed by bank_boundary_probe)
 inline constexpr uint32_t ROWS_PER_BANK         = 1u << (BANK_GROUP_SHIFT - ROW_SHIFT);  // 16
 
 // ─── decoders ────────────────────────────────────────────────────────

@@ -5,27 +5,32 @@
 // reproduce the TT-Rowhammer characterization (Methods 2, 3, 5) on the
 // CURRENT hardware.
 //
-// The host hands us a list of byte offsets (relative to the channel base)
-// to probe.  For each pair (offset[2k], offset[2k+1]) we:
+// Protocol (matches `dram_latency/kernels/validation_probe.cpp` Mode 0):
 //
-//   1. Issue an "open A then access B" sequence that forces a row-buffer
-//      miss if A and B are on the same bank but different rows.  We use
-//      the alternating A,B,A,B,... pattern with a final timed read of A,
-//      same primitive used by TT-Rowhammer.
-//   2. Record the median-style robust latency in cycles to the result
-//      buffer at slot k.
+//   For each (off_a, off_b) probe, repeat NUM_TRIALS times:
+//     1. Flush-read at off_a + 128 MB to close any open row buffer.
+//     2. Time a pipelined burst of BURST_PAIRS alternating (A, B) reads
+//        with a SINGLE barrier at the end.
+//     3. Sample = total cycles for the 2*BURST_PAIRS reads.
+//   Result = median across trials, comparable to the canonical
+//   833 / 873 / 897 cyc bands (same-row / diff-row / cross-bank-group).
 //
-// A single launch can probe up to MAX_PROBES pairs.  The host parses the
-// resulting cycle counts and classifies each pair as same-row / row-buffer
-// miss / cross-bank-group based on the 833 / 873 / 897 cycle bands.
+// Why a pipelined burst and not a single timed read of A:
+//   The previous version timed one A-read with a barrier-per-read, so the
+//   ~456 cyc NOC round-trip dominated and masked the ~40 cyc DRAM row-switch
+//   penalty. All bands collapsed to ~451 cyc and the latency tiers vanished.
+//   A pipelined burst with one barrier at the end exposes the row-switch
+//   cost because the controller's ability to overlap reads is exactly what
+//   row conflicts disrupt.
 
 #include <cstdint>
 
 constexpr uint32_t CACHELINE     = 64;
 constexpr uint32_t MAX_PROBES    = 64;     // pairs per kernel launch
-constexpr uint32_t NUM_TRIALS    = 33;     // odd ⇒ exact median
-constexpr uint32_t EVICT_BURST   = 16;     // 16 × 64 B = 1 KiB of B before timing A
-constexpr uint32_t SCRATCH_BYTES = EVICT_BURST * CACHELINE; // per-side scratch budget
+constexpr uint32_t NUM_TRIALS    = 17;     // odd ⇒ exact median
+constexpr uint32_t BURST_PAIRS   = 8;      // pipelined A,B,A,B,... pairs (matches canonical)
+constexpr uint32_t FLUSH_OFFSET  = 128 * 1024 * 1024;  // 128 MB — toggles bit 27, crosses bank groups
+constexpr uint32_t SCRATCH_BYTES = 2 * CACHELINE;       // one slot per side
 
 void kernel_main() {
     uint32_t dram_noc_x      = get_arg_val<uint32_t>(0);
@@ -39,10 +44,10 @@ void kernel_main() {
     if (num_probes > MAX_PROBES) num_probes = MAX_PROBES;
 
     uint32_t scratch_a = l1_scratch_addr;
-    uint32_t scratch_b = l1_scratch_addr + SCRATCH_BYTES;
+    uint32_t scratch_b = l1_scratch_addr + CACHELINE;
 
     volatile uint32_t* results = reinterpret_cast<volatile uint32_t*>(l1_result_addr);
-    // Layout: [0] = num_probes, [1+k] = median cycles for pair k.
+    // Layout: [0] = num_probes, [1+k] = median total burst cycles for pair k.
     results[0] = num_probes;
     for (uint32_t k = 0; k < MAX_PROBES; ++k) results[1 + k] = 0xFFFFFFFFu;
 
@@ -52,38 +57,32 @@ void kernel_main() {
         uint32_t off_a = get_arg_val<uint32_t>(5 + 2 * k + 0);
         uint32_t off_b = get_arg_val<uint32_t>(5 + 2 * k + 1);
 
-        uint64_t noc_a = get_noc_addr(dram_noc_x, dram_noc_y, off_a);
+        uint64_t noc_a     = get_noc_addr(dram_noc_x, dram_noc_y, off_a);
+        uint64_t noc_b     = get_noc_addr(dram_noc_x, dram_noc_y, off_b);
+        uint64_t noc_flush = get_noc_addr(dram_noc_x, dram_noc_y, off_a + FLUSH_OFFSET);
 
         for (uint32_t t = 0; t < NUM_TRIALS; ++t) {
-            // Warm-up: open A.
-            noc_async_read(noc_a, scratch_a, CACHELINE);
+            // Flush: read from a far region (bit 27 toggled) to close any
+            // open row buffer this anchor's bank may still hold.
+            noc_async_read(noc_flush, scratch_a, CACHELINE);
             noc_async_read_barrier();
 
-            // Force eviction: read EVICT_BURST distinct cachelines from row B.
-            // If A and B share a bank, the controller must close A's row to
-            // serve these.  EVICT_BURST cachelines = 1 KiB stays inside an
-            // 8 KiB DRAM row so we never accidentally cross into row B+1.
-            for (uint32_t j = 0; j < EVICT_BURST; ++j) {
-                uint64_t noc_b = get_noc_addr(dram_noc_x, dram_noc_y,
-                                              off_b + j * CACHELINE);
-                noc_async_read(noc_b, scratch_b + j * CACHELINE, CACHELINE);
-            }
-            noc_async_read_barrier();
-
-            // Time the re-access of A.  If A's row was closed, this pays
-            // the row-activation cost; otherwise it's a row-buffer hit.
             volatile uint32_t lo0 = *reinterpret_cast<volatile uint32_t*>(RISCV_DEBUG_REG_WALL_CLOCK_L);
             volatile uint32_t hi0 = *reinterpret_cast<volatile uint32_t*>(RISCV_DEBUG_REG_WALL_CLOCK_H);
-            uint64_t tA = (static_cast<uint64_t>(hi0) << 32) | lo0;
+            uint64_t t0 = (static_cast<uint64_t>(hi0) << 32) | lo0;
 
-            noc_async_read(noc_a, scratch_a, CACHELINE);
+            // Pipelined alternating A/B burst, single barrier at end.
+            for (uint32_t i = 0; i < BURST_PAIRS; ++i) {
+                noc_async_read(noc_a, scratch_a, CACHELINE);
+                noc_async_read(noc_b, scratch_b, CACHELINE);
+            }
             noc_async_read_barrier();
 
             volatile uint32_t lo1 = *reinterpret_cast<volatile uint32_t*>(RISCV_DEBUG_REG_WALL_CLOCK_L);
             volatile uint32_t hi1 = *reinterpret_cast<volatile uint32_t*>(RISCV_DEBUG_REG_WALL_CLOCK_H);
-            uint64_t tB = (static_cast<uint64_t>(hi1) << 32) | lo1;
+            uint64_t t1 = (static_cast<uint64_t>(hi1) << 32) | lo1;
 
-            samples[t] = static_cast<uint32_t>(tB - tA);
+            samples[t] = static_cast<uint32_t>(t1 - t0);
         }
 
         // Insertion sort then pick the median.  NUM_TRIALS is small.

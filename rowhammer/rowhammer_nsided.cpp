@@ -145,7 +145,7 @@ static void print_ecc_delta(const char* label, const EccCounters& before, const 
 static constexpr uint32_t ROW_SIZE         = 8192;
 static constexpr uint32_t CACHELINE        = 64;
 static constexpr double   NS_PER_CYCLE     = 1.25;
-static constexpr uint32_t ROWS_PER_BANK    = 16;    // from address bit mapping
+static constexpr uint32_t ROWS_PER_BANK    = 16;    // confirmed by bank_boundary_probe (FLUSH-READ activation jump at spacing=16)
 static constexpr uint32_t MAX_AGGRESSORS   = 30;    // kernel limit
 
 static constexpr uint32_t RESULT_HDR_WORDS   = 6;
